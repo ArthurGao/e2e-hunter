@@ -1,0 +1,105 @@
+/**
+ * Template for a NestJS API E2E spec file.
+ *
+ * Copy to e2e/api/<resource>.api.spec.ts.
+ * Uses Playwright's `request` fixture (no browser, no page).
+ *
+ * Every API spec should cover:
+ * - 200 happy path
+ * - 401 without token
+ * - 403 with wrong role
+ * - 400 with bad input
+ * - 404 for non-existent resource
+ * - Response schema (especially: no sensitive fields leak)
+ */
+
+import { test, expect, APIRequestContext } from '@playwright/test';
+
+const API = process.env.API_URL || 'http://localhost:3001';
+
+let authToken: string;
+let request: APIRequestContext;
+
+test.beforeAll(async ({ playwright }) => {
+  request = await playwright.request.newContext({ baseURL: API });
+
+  const res = await request.post('/auth/login', {
+    data: {
+      email: process.env.TEST_EMAIL || 'test@example.com',
+      password: process.env.TEST_PASSWORD || 'password',
+    },
+  });
+  expect(res.ok()).toBeTruthy();
+  const body = await res.json();
+  authToken = body.access_token || body.accessToken || body.token;
+});
+
+test.afterAll(async () => {
+  await request?.dispose();
+});
+
+// ── GET /<resource> ──────────────────────────────────────────────────────
+test.describe('GET /<resource>', () => {
+  test('200 with valid token', async () => {
+    const res = await request.get('/<resource>', {
+      headers: { Authorization: `Bearer ${authToken}` },
+    });
+    expect(res.status()).toBe(200);
+    const body = await res.json();
+    expect(Array.isArray(body) || typeof body === 'object').toBe(true);
+  });
+
+  test('401 without token', async () => {
+    const res = await request.get('/<resource>');
+    expect(res.status()).toBe(401);
+  });
+
+  test('response schema does not leak sensitive fields', async () => {
+    const res = await request.get('/<resource>', {
+      headers: { Authorization: `Bearer ${authToken}` },
+    });
+    const body = await res.json();
+    const items = Array.isArray(body) ? body : [body];
+
+    for (const item of items) {
+      expect(item).not.toHaveProperty('password');
+      expect(item).not.toHaveProperty('passwordHash');
+      expect(item).not.toHaveProperty('secret');
+      expect(item).not.toHaveProperty('apiKey');
+    }
+  });
+});
+
+// ── POST /<resource> ─────────────────────────────────────────────────────
+test.describe('POST /<resource>', () => {
+  test('201 happy path', async () => {
+    const res = await request.post('/<resource>', {
+      headers: { Authorization: `Bearer ${authToken}` },
+      data: { /* valid payload */ },
+    });
+    expect([200, 201]).toContain(res.status());
+  });
+
+  test('400 with missing required field', async () => {
+    const res = await request.post('/<resource>', {
+      headers: { Authorization: `Bearer ${authToken}` },
+      data: {},
+    });
+    expect(res.status()).toBe(400);
+  });
+
+  test('401 without token', async () => {
+    const res = await request.post('/<resource>', { data: {} });
+    expect(res.status()).toBe(401);
+  });
+});
+
+// ── GET /<resource>/:id ──────────────────────────────────────────────────
+test.describe('GET /<resource>/:id', () => {
+  test('404 for non-existent id', async () => {
+    const res = await request.get('/<resource>/non-existent-id-xyz', {
+      headers: { Authorization: `Bearer ${authToken}` },
+    });
+    expect(res.status()).toBe(404);
+  });
+});

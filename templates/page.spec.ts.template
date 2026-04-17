@@ -1,0 +1,80 @@
+/**
+ * Template for a page E2E spec file.
+ *
+ * Copy to e2e/pages/<page-name>.spec.ts and replace <Route>, <PageName>,
+ * <endpoint>, and assertions with the actual values for the target page.
+ *
+ * Every page spec should contain these 4 describe blocks.
+ */
+
+import { test, expect } from '@playwright/test';
+
+// ── Unauthenticated ──────────────────────────────────────────────────────
+test.describe('<PageName> — unauthenticated', () => {
+  test('redirects to login when not authenticated', async ({ page }) => {
+    await page.goto('/<route>');
+    await expect(page).toHaveURL(/.*login/);
+  });
+});
+
+// ── Authenticated ────────────────────────────────────────────────────────
+test.describe('<PageName> — authenticated', () => {
+  test.use({ storageState: 'e2e/.auth/user.json' });
+
+  test('loads successfully', async ({ page }) => {
+    await page.goto('/<route>');
+    await expect(page).toHaveURL('/<route>');
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+  });
+
+  test('displays data correctly', async ({ page }) => {
+    await page.goto('/<route>');
+    // TODO: assert key data elements are visible
+  });
+
+  test('shows empty state when no data', async ({ page }) => {
+    await page.route('**/api/<endpoint>', r =>
+      r.fulfill({ status: 200, contentType: 'application/json', body: '[]' })
+    );
+    await page.goto('/<route>');
+    await expect(page.getByText(/no .* (found|yet)/i)).toBeVisible();
+  });
+});
+
+// ── Form interactions ────────────────────────────────────────────────────
+test.describe('<PageName> — form interactions', () => {
+  test.use({ storageState: 'e2e/.auth/user.json' });
+
+  test('shows validation errors on empty submit', async ({ page }) => {
+    await page.goto('/<route>');
+    await page.getByRole('button', { name: /submit|save|create/i }).click();
+    await expect(page.getByText(/required/i)).toBeVisible();
+  });
+
+  test('submits form successfully', async ({ page }) => {
+    await page.goto('/<route>');
+    await page.getByLabel(/name/i).fill('Test Value');
+    await page.getByRole('button', { name: /submit|save|create/i }).click();
+    await expect(page.getByText(/success|created/i)).toBeVisible();
+  });
+});
+
+// ── Error states ─────────────────────────────────────────────────────────
+test.describe('<PageName> — error states', () => {
+  test.use({ storageState: 'e2e/.auth/user.json' });
+
+  test('shows error UI when API fails with 500', async ({ page }) => {
+    await page.route('**/api/<endpoint>', r =>
+      r.fulfill({ status: 500, body: JSON.stringify({ error: 'Server error' }) })
+    );
+    await page.goto('/<route>');
+    await expect(page.getByText(/something went wrong|error|failed/i)).toBeVisible();
+  });
+
+  test('does not crash on network error', async ({ page }) => {
+    await page.route('**/api/<endpoint>', r => r.abort());
+    await page.goto('/<route>');
+    // Page should still render a shell / error state, not a blank white screen
+    await expect(page.locator('body')).not.toBeEmpty();
+  });
+});

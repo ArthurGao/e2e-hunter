@@ -1,0 +1,101 @@
+/**
+ * Template for a cross-app E2E spec file.
+ *
+ * Copy to e2e/cross-app/<flow-name>.spec.ts.
+ * Uses the multi-app fixture — each test gets isolated BrowserContext per app.
+ *
+ * Every cross-app spec should cover:
+ * - Happy path: action in App A appears in App B
+ * - Reverse: action in App B reflects in App A
+ * - Delete propagation
+ * - Failure isolation: App B down → App A still works
+ */
+
+import { test, expect } from '../fixtures/multi-app.fixture';
+import { waitForSync } from '../helpers/wait-for-sync';
+
+// ── Happy path ───────────────────────────────────────────────────────────
+test.describe('<Flow> — happy path', () => {
+  test('create in App A appears in App B', async ({ appA, appB }) => {
+    // Step 1: trigger in App A
+    await appA.page.goto('/<create-route>');
+    await appA.page.getByLabel(/title|name/i).fill('Cross-App Test Item');
+    await appA.page.getByRole('button', { name: /create|submit/i }).click();
+    await expect(appA.page.getByText(/success|created/i)).toBeVisible();
+
+    // Step 2: wait for sync to App B
+    await waitForSync(appB.page, {
+      url: '/<list-route>',
+      assertion: async (page) => {
+        await expect(page.getByText('Cross-App Test Item')).toBeVisible();
+      },
+      timeout: 10000,
+    });
+
+    // Step 3: verify in App B
+    await expect(appB.page.getByText('Cross-App Test Item')).toBeVisible();
+  });
+});
+
+// ── Reverse flow ─────────────────────────────────────────────────────────
+test.describe('<Flow> — reverse', () => {
+  test('action in App B reflects in App A', async ({ appA, appB }) => {
+    // Assume item already exists (create via API in beforeAll for isolation)
+    await appB.page.goto('/<item-route>/<id>');
+    await appB.page.getByRole('button', { name: /approve|confirm/i }).click();
+
+    await waitForSync(appA.page, {
+      url: '/<item-route>/<id>',
+      assertion: async (page) => {
+        await expect(page.getByText(/approved|confirmed/i)).toBeVisible();
+      },
+    });
+  });
+});
+
+// ── Delete propagation ───────────────────────────────────────────────────
+test.describe('<Flow> — delete propagation', () => {
+  test('deletion in App A removes from App B', async ({ appA, appB }) => {
+    // Assume item exists
+    await appA.page.goto('/<item-route>/<id>');
+    await appA.page.getByRole('button', { name: /delete|remove/i }).click();
+    await appA.page.getByRole('button', { name: /confirm/i }).click();
+
+    await waitForSync(appB.page, {
+      url: '/<list-route>',
+      assertion: async (page) => {
+        await expect(page.getByText('<item-name>')).not.toBeVisible();
+      },
+    });
+  });
+});
+
+// ── Failure isolation ────────────────────────────────────────────────────
+test.describe('<Flow> — failure isolation', () => {
+  test('App A degrades gracefully when App B is unreachable', async ({ appA }) => {
+    // Block all requests from App A to App B's domain
+    await appA.context.route('**/app-b.example.com/**', r => r.abort());
+
+    await appA.page.goto('/<page-that-links-to-app-b>');
+    // App A should still load and show an error banner, not crash
+    await expect(appA.page.locator('body')).not.toBeEmpty();
+    // Optional: assert a specific fallback UI
+    // await expect(appA.page.getByText(/temporarily unavailable/i)).toBeVisible();
+  });
+});
+
+// ── Data consistency ─────────────────────────────────────────────────────
+test.describe('<Flow> — data consistency', () => {
+  test('same record shows identical data in both apps', async ({ appA, appB }) => {
+    // Assume item exists with known id
+    const id = '<known-test-id>';
+
+    await appA.page.goto(`/<item-route>/${id}`);
+    const appAValue = await appA.page.getByTestId('item-title').textContent();
+
+    await appB.page.goto(`/<item-route>/${id}`);
+    const appBValue = await appB.page.getByTestId('item-title').textContent();
+
+    expect(appAValue).toEqual(appBValue);
+  });
+});
