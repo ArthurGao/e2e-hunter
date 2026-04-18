@@ -1,23 +1,24 @@
 /**
- * Multi-app Playwright fixture.
+ * Multi-app Playwright fixture — supports ANY number of apps.
  *
- * Enables cross-app E2E testing: each test gets isolated BrowserContext
- * per app, each with its own storage state (auth cookies).
+ * Driven entirely by `.env.test`: list app names in `APPS=`, then define
+ * per-app config using `APP_<NAME>_URL`, `APP_<NAME>_AUTH`, etc.
  *
  * Usage:
  *   import { test, expect } from '../fixtures/multi-app.fixture';
  *
- *   test('cross-app flow', async ({ appA, appB }) => {
- *     await appA.page.goto('/create');
- *     // ...
- *     await expect(appB.page.getByText('...')).toBeVisible();
+ *   test('cross-app flow', async ({ apps }) => {
+ *     await apps.admin.page.goto('/create');
+ *     await expect(apps.candidate.page.getByText('...')).toBeVisible();
  *   });
  *
  * Required env vars (see .env.test):
- *   APP_A_URL, APP_B_URL            — base URLs
- *   APP_A_AUTH, APP_B_AUTH          — "true" to load auth state
+ *   APPS                              — comma-separated app names, e.g. "admin,candidate"
+ *   APP_<NAME>_URL                    — base URL per app (required)
+ *   APP_<NAME>_AUTH                   — "true" to load saved storage state (optional)
  *
- * To add a third app: copy the appA fixture block, rename, add env vars.
+ * Access: `apps[name].page`, `apps[name].context`, `apps[name].baseURL`.
+ * Names are lowercase strings from the `APPS` list. Env keys are uppercased.
  */
 
 import { test as base, BrowserContext, Page } from '@playwright/test';
@@ -29,40 +30,58 @@ export type AppContext = {
   baseURL: string;
 };
 
+export type Apps = Record<string, AppContext>;
+
 type MultiAppFixtures = {
-  appA: AppContext;
-  appB: AppContext;
+  apps: Apps;
 };
 
 const AUTH_DIR = path.join(__dirname, '..', '.auth');
 
-export const test = base.extend<MultiAppFixtures>({
-  appA: async ({ browser }, use) => {
-    const baseURL = process.env.APP_A_URL || 'http://localhost:3000';
-    const context = await browser.newContext({
-      baseURL,
-      storageState:
-        process.env.APP_A_AUTH === 'true'
-          ? path.join(AUTH_DIR, 'app-a-user.json')
-          : undefined,
-    });
-    const page = await context.newPage();
-    await use({ context, page, baseURL });
-    await context.close();
-  },
+function parseAppNames(): string[] {
+  const raw = process.env.APPS ?? '';
+  const names = raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (names.length === 0) {
+    throw new Error(
+      'APPS env var is empty. Set it in .env.test, e.g. APPS=admin,candidate',
+    );
+  }
+  return names;
+}
 
-  appB: async ({ browser }, use) => {
-    const baseURL = process.env.APP_B_URL || 'http://localhost:3001';
-    const context = await browser.newContext({
-      baseURL,
-      storageState:
-        process.env.APP_B_AUTH === 'true'
-          ? path.join(AUTH_DIR, 'app-b-user.json')
+export const test = base.extend<MultiAppFixtures>({
+  apps: async ({ browser }, use) => {
+    const names = parseAppNames();
+    const apps: Apps = {};
+
+    for (const name of names) {
+      const key = name.toUpperCase();
+      const baseURL = process.env[`APP_${key}_URL`];
+      if (!baseURL) {
+        throw new Error(
+          `Missing APP_${key}_URL for app "${name}". Add it to .env.test.`,
+        );
+      }
+
+      const authEnabled = process.env[`APP_${key}_AUTH`] === 'true';
+      const context = await browser.newContext({
+        baseURL,
+        storageState: authEnabled
+          ? path.join(AUTH_DIR, `${name}-user.json`)
           : undefined,
-    });
-    const page = await context.newPage();
-    await use({ context, page, baseURL });
-    await context.close();
+      });
+      const page = await context.newPage();
+      apps[name] = { context, page, baseURL };
+    }
+
+    await use(apps);
+
+    for (const { context } of Object.values(apps)) {
+      await context.close();
+    }
   },
 });
 

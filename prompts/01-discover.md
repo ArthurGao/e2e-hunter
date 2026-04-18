@@ -5,6 +5,19 @@
 ```
 Scan this project and list ALL test scenarios. Do NOT write any test code yet.
 
+STEP -1 — Read project notes (if present):
+  test -f e2e/HUNTER_NOTES.md && cat e2e/HUNTER_NOTES.md
+
+  Parse four optional sections:
+    ## Scope               → exclude matched areas from the scan + matrix
+    ## Focus               → boost coverage on these areas (more scenarios)
+    ## Constraints         → rules for the Phase 7 fix loop
+    ## Known dev-mode quirks → classify matching failures as KNOWN_QUIRK
+    ## Ask user before generating (optional) → surface as Open Questions
+
+  User's chat instructions this session override the file.
+  If the file is absent, proceed with defaults.
+
 STEP 0 — Detect tech stack:
 
 Find all apps:
@@ -50,6 +63,65 @@ Backend endpoints:
   Spring Boot:   grep -rn "@GetMapping\|@PostMapping\|@PutMapping\|@DeleteMapping" --include="*.java" --include="*.kt" . | grep -v "src/test"
   Laravel:       cat routes/api.php routes/web.php 2>/dev/null
   OpenAPI spec:  find . -name "openapi.json" -o -name "openapi.yaml" | grep -v node_modules
+
+UI components (dialogs, modals, wizards, drawers, sheets, steppers):
+  # File-name scan
+  find . \( -name "*.tsx" -o -name "*.jsx" -o -name "*.vue" -o -name "*.svelte" \) \
+    -not -path "*/node_modules/*" -not -path "*/dist/*" \
+    | grep -iE "(dialog|modal|wizard|drawer|sheet|popover|stepper|overlay)" \
+    | sort
+
+  # Usage scan (React/shadcn/Radix/MUI/Ant)
+  grep -rn "<Dialog\|<Modal\|<Drawer\|<Sheet\|<Wizard\|<Stepper\|<AlertDialog" \
+    --include="*.tsx" --include="*.jsx" . | grep -v node_modules | head -20
+
+  For each discovered component, look at conditional rendering in the file:
+    grep -nE "(if|&&|\?\s*\()\s*(is|has|requires|show|mode|type|variant|kind)" <file>
+  Each distinct branch = one test variant. Capture into the matrix.
+  Common variant axes: file-only vs form-only vs hybrid, single vs multi file,
+  create vs edit, permission/role-gated, status-locked (read-only), step count.
+
+  When a user's Focus directive names a user-visible ACTION (upload / submit /
+  review / create / edit), expand scope to include the dialog/modal that
+  handles the action AND its variants — don't just test the API route.
+
+Test-readiness score (per component):
+  For each component found above, count stable test handles vs interactive
+  targets — determines how deep Phase 4 can go.
+
+    file=<component-file>
+    handles=$(grep -cE 'data-testid=|data-cy=|aria-label=|aria-labelledby=' "$file")
+    labels=$(grep -cE '<label[^>]*htmlFor=|<Label[^>]*htmlFor=' "$file")
+    roles=$(grep -cE 'role="(dialog|button|textbox|combobox|tab|heading)"' "$file")
+    targets=$(grep -cE '<(Input|Button|Textarea|Select|Tab|Checkbox|Switch|RadioGroup|button|input|textarea|select)' "$file")
+    # coverage = (handles + labels + roles) / targets
+
+  Bands:
+    🟢 Green ≥0.80  → full interaction tests; selectors use getByRole/getByLabel/getByTestId
+    🟡 Amber 0.30–0.80 → happy-path + one edge case, `.catch(() => skip)` on brittle steps
+    🔴 Red <0.30  → mount-level tests only; output becomes "improvement actions" list
+
+  Any Red or Amber component must get a line in Phase 2 output listing the
+  specific project-side changes to raise its score (add data-testid on named
+  buttons, add htmlFor on label/input pairs, expose step headings as role=heading).
+
+Infrastructure preconditions (detect early, record in Tech Stack Map):
+  # Hot-reload dev server?
+  grep -rE '"dev":\s*"(next dev|vite|nuxi dev|ng serve|webpack-dev-server)' \
+    --include=package.json . | grep -v node_modules
+
+  # Conditional base path (Next.js / Vue / Svelte)
+  grep -rnE 'basePath|assetPrefix|app\.baseURL|paths\.base' \
+    --include='next.config.*' --include='nuxt.config.*' \
+    --include='svelte.config.*' . | grep -v node_modules
+
+  # Seed / fixtures scripts
+  grep -rE '"(seed|db:seed|migrate:seed|fixtures)"' \
+    --include=package.json . | grep -v node_modules
+
+  Carry these findings as warnings through Phase 3 (setup) and Phase 5 (run):
+  hot-reload → `--workers=1`, conditional basePath → tests stick to dev mode,
+  seed script present → recommend running before Phase 5.
 
 Auth boundaries:
   JS/TS:   grep -rn "@UseGuards\|middleware.*auth\|withAuth\|useAuth\|isAuthenticated" --include="*.ts" --include="*.tsx" . | grep -v node_modules | head -20
@@ -111,6 +183,21 @@ STEP 4 — Summary:
   - Single-app scenarios: N
   - Cross-app scenarios: N
   - Auth method per app: list
+
+STEP 5 — Persist the scenario matrix to disk:
+  Write everything from STEP 3 (tables A–F) and STEP 4 (summary) to
+  `e2e/SCENARIO_MATRIX.md`. Create the `e2e/` directory if it does not
+  exist. Use one `## ` heading per section:
+
+    ## Tech Stack Map
+    ## App Inventory
+    ## Cross-App Relationships
+    ## Scenario Matrix
+    ## Coverage Checklist
+    ## Summary
+
+  After writing the file, print its path back to the user so they can
+  open / edit / version-control it.
 
 STOP. Wait for approval before generating any test files.
 ```

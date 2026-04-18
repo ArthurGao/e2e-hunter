@@ -1,0 +1,89 @@
+# e2e-hunter project notes
+
+Copy this file to `e2e/HUNTER_NOTES.md` at your project root and fill in the
+sections that matter for your project. Leave unused sections empty or delete
+them. e2e-hunter reads this before Phase 0 on every run.
+
+All sections are optional. Bullet points work well — plain prose also works.
+Claude parses semi-structured content and applies it to the right phase.
+
+---
+
+## Scope
+
+Applied in Phase 1 (scanning) and Phase 2 (scenario matrix).
+List areas the skill should NOT test or scan.
+
+<!-- examples:
+- Ignore all auth/login flows — being replaced by Azure AD B2C
+- Skip RBAC / role-permission checks
+- Don't scan the `legacy-admin/` directory
+- Exclude internal health/metrics endpoints (`/api/_status`, `/api/metrics`)
+-->
+
+## Focus
+
+Applied in Phase 2 (boost matrix priority) and Phase 4 (more scenarios generated).
+List areas you want deeper-than-default coverage for.
+
+<!-- examples:
+- Service-request per-document submission/review flow (PER_DOCUMENT review mode)
+- Document upload + admin review cross-app flow (happy path + rejection)
+- Candidate assessment questionnaire round-trip (data integrity)
+- Messaging: two-way conversation, read receipts, attachments
+-->
+
+## Constraints
+
+Applied in Phase 7 (fix-and-retest loop).
+List "do not touch" rules and guardrails for automated fixes.
+
+<!-- examples:
+- Do not modify `backend/src/modules/auth/**` — being rewritten
+- Only apply backend fixes ≤ 20 LOC; larger fixes must be proposed not applied
+- Never modify `*.env*` files
+- No database migrations; schema changes require a PR discussion
+- Do not touch anything under `legacy/`
+-->
+
+## Known dev-mode quirks
+
+Applied in Phase 6 (bug classification).
+List "this isn't a bug" behaviors so they get tagged `KNOWN_QUIRK` instead
+of `API_BUG` / `UI_BUG`.
+
+<!-- examples:
+- MockAuthGuard auto-logs-in as dev-super when no auth header is present
+  (backend/src/modules/auth/guards/mock-auth.guard.ts:178)
+- Synthetic mock user UUIDs not in `users` table → 500 on mutations that
+  stamp created_by. Workaround: use X-Mock-User-Email with a real seeded email.
+- candidate portal labels "/service-requests" as "Visa Applications"
+  (intentional candidate-facing terminology)
+-->
+
+## Test-readiness notes
+
+Applied in Phase 1E (scoring) and Phase 2 (generation strategy).
+Optional — only add entries here when you want to override the automatic scan.
+
+<!-- examples:
+- TreatAsGreen: components/LegacyDialog.tsx — we know it has unusual selectors
+  but the test fixture below covers them explicitly
+- TreatAsRed: components/OldWizard.tsx — schedule for data-testid audit in Q2,
+  accept mount-only tests until then
+- RequiredFixture: `e2e/fixtures/pdf/small.pdf` — used by upload dialog tests;
+  regenerate by running `node scripts/gen-fixtures.js`
+- SeededData: these tests require at least one candidate with each document
+  variant attached — run `npm run seed:variants` before Phase 5
+-->
+
+## Ask user before generating
+
+Optional. If present, the skill stops after Phase 2 and asks each question
+before writing test files in Phase 4.
+
+<!-- examples:
+- Which SR statuses should have transition tests? (pick from: draft, active, on_hold, rfi, ready_to_lodge, lodged, approved, rejected)
+- Use the production database or a seeded dev DB?
+- Include destructive tests (DELETE endpoints, cascading deletes)?
+-->

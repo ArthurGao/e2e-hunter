@@ -14,6 +14,12 @@
  */
 
 import { defineConfig, devices } from '@playwright/test';
+import dotenv from 'dotenv';
+import path from 'path';
+
+// Load .env.test from the same directory as this config.
+// Keeps the skill project-agnostic: each target project drops its own .env.test next to playwright.config.ts.
+dotenv.config({ path: path.resolve(__dirname, '.env.test') });
 
 export default defineConfig({
   testDir: './e2e',
