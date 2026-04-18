@@ -469,6 +469,380 @@ Keep the recommendations **framework-agnostic** — `data-testid`, `aria-*`, and
 
 ---
 
+### 1E.2 — Conditional-Render Scan (state-driven UI branches)
+
+Test-readiness scoring tells you IF a component is testable; this step tells
+you WHAT states need fixtures to exercise the component. Dialogs that render
+different branches based on entity status (locked badge, completion banner,
+"already approved" warning) are invisible to API tests — the API returns
+`status: "approved"`, but did the UI actually show the lock icon?
+
+Run per UI component found in 1D:
+
+```bash
+# Entity-status-driven branches
+grep -nE '\{[a-zA-Z_]+\.(status|state|type|kind|role)\s*===?\s*["'"'"'][^"'"'"']+["'"'"']' <file>
+
+# Boolean-flag-driven branches
+grep -nE '(if|&&|\?)\s*\(?\s*[a-zA-Z_]+\.(locked|disabled|readonly|expired|archived|approved|rejected|completed)\b' <file>
+
+# Prop-driven variants
+grep -nE '(if|&&)\s*\(?\s*(mode|variant|kind|type)\s*===?' <file>
+
+# Permission / role gates
+grep -nE '(hasPermission|canAccess|isAdmin|userRole\s*===?)' <file>
+```
+
+Record each distinct branch with the state it depends on:
+
+```
+<component>.tsx:
+  branch A — rendered when entity.status === 'approved'  (expect: <Badge>Approved</Badge>, upload disabled)
+  branch B — rendered when entity.status === 'rejected'  (expect: rejection reason visible, re-upload button)
+  branch C — rendered when entity.locked === true        (expect: lock icon, submit disabled)
+```
+
+Each distinct branch = one **state-fixture test** in the Phase 2 matrix:
+
+| Test row | Setup (API) | Render (UI) | Assert |
+|---|---|---|---|
+| Component X with entity in state A | `POST /resource` + `PATCH /:id/status → A` | Load page, open component | Branch A visible, Branch B hidden |
+| Component X with entity in state B | setup as above with status B | Load page, open component | Branch B visible, Branch A hidden |
+
+These rows go into the matrix labeled `Test Layer: STATE-FIXTURE` so Phase 4
+generates setup-via-API + render-in-browser + branch-assertion tests rather
+than generic happy-path tests that pick whichever state happens to be seeded.
+
+**When skipping is OK:** if a component scored Red in 1E, state-fixture tests
+are also Red — note the branches but don't generate tests until readiness
+rises.
+
+---
+
+### 1G — Side-Effect Sink Scan (audit logs, emails, webhooks, queued jobs)
+
+Many bugs hide in side effects that are invisible from HTTP responses — the
+mutation returns 200, but no audit row was written, no email was sent, no
+webhook fired. Detect these sinks and pair each mutation with a probe.
+
+**Scan for sinks (per language):**
+
+```bash
+# Audit / activity logs (JS/TS)
+grep -rn "AuditLogService\.\|auditLog\.\|activityLog\.\|logger\.audit" \
+  --include="*.ts" --include="*.js" . | grep -v node_modules | grep -v spec
+
+# Email sending
+grep -rn "emailService\.send\|mailer\.send\|sendgrid\|postmark\|ses\.send\|@InjectQueue.*mail\|nodemailer" \
+  --include="*.ts" --include="*.js" . | grep -v node_modules | grep -v spec
+
+# Event emitters / message queues
+grep -rn "@OnEvent\|eventEmitter\.emit\|@EventHandler\|@Subscribe\|kafka.*publish\|rabbitmq.*publish\|sqs.*send" \
+  --include="*.ts" --include="*.js" . | grep -v node_modules | grep -v spec
+
+# Outgoing webhooks
+grep -rn "webhook\.post\|axios\.post.*webhook\|fetch.*webhook" \
+  --include="*.ts" --include="*.js" . | grep -v node_modules | grep -v spec
+
+# Python
+grep -rn "celery\.\|\.delay(\|tasks\.send_task\|signals\.\|post_save\|django.*signals\|audit_log" \
+  --include="*.py" . | grep -v venv
+
+# Ruby
+grep -rn "ActiveJob\|sidekiq\|perform_later\|after_commit\|audit.*log\|ActionMailer" \
+  --include="*.rb" . | grep -v vendor
+
+# Go
+grep -rn "nats\.Publish\|kafka\.Writer\|ch\s*<-\|log\.Audit" --include="*.go" . | grep -v vendor
+```
+
+**For each detected sink, emit into the matrix:**
+
+| Mutation | Sink | Oracle |
+|---|---|---|
+| `POST /candidates/signup` | `email_log` table | After signup, `SELECT count(*) FROM email_log WHERE recipient = ... AND template = 'welcome'` increments by 1 |
+| `PATCH /service-requests/:id/status` | `audit_log` table | After status change, audit log has a row with `action=STATUS_CHANGE`, correct `entity_id` |
+| `DELETE /candidates/:id` | `activity_events` | Deletion produces an `activity_events` row with `type=candidate_deleted` |
+| `POST /notifications/broadcast` | outbound webhook | Webhook endpoint sees a POST with `event=broadcast.sent` within 5s |
+
+**How the oracle is implemented:**
+
+For DB-sink oracles, the test either:
+1. Calls a `/audit-logs` or `/events` list endpoint (if exposed) to verify count delta, OR
+2. Uses a direct DB probe via a test-only helper (requires `TEST_DB_URL` in `.env.test`).
+
+For webhook/queue sinks, use a mock receiver (ngrok-style local listener, or
+set `WEBHOOK_URL` to a test endpoint the test spec owns).
+
+**What NOT to probe:** logger.info(), console.log(), metrics.increment — these
+are observability, not side effects that need correctness verification.
+
+---
+
+### 1H — Relationship & Cascade Scan (ORM-aware)
+
+After DELETE parent, what happens to children? After DELETE user, what about
+their documents, messages, assignments? Skill reads ORM metadata and generates
+cascade probes automatically.
+
+**Scan ORM relationships:**
+
+```bash
+# TypeORM (NestJS / Express)
+grep -rn "@ManyToOne\|@OneToMany\|@ManyToMany\|@OneToOne" \
+  --include="*.entity.ts" . | grep -v node_modules
+
+# Prisma
+find . -name "schema.prisma" -not -path "*/node_modules/*" \
+  | xargs grep -n "@relation\|references:" 2>/dev/null
+
+# Sequelize
+grep -rn "belongsTo\|hasMany\|hasOne\|belongsToMany" \
+  --include="*.ts" --include="*.js" . | grep -v node_modules
+
+# Django ORM (Python)
+grep -rn "ForeignKey\|OneToOneField\|ManyToManyField" \
+  --include="*.py" . | grep -v venv
+
+# ActiveRecord (Ruby)
+grep -rn "belongs_to\|has_many\|has_one" \
+  --include="*.rb" . | grep -v vendor
+
+# GORM (Go)
+grep -rn "gorm:\"foreignKey\|gorm:\"references" --include="*.go" . | grep -v vendor
+
+# JPA (Java/Kotlin)
+grep -rn "@OneToMany\|@ManyToOne\|@ManyToMany\|@OneToOne" \
+  --include="*.java" --include="*.kt" . | grep -v "src/test"
+```
+
+**Build a relationship map:**
+
+```
+parent: ServiceRequest
+  ↓ @OneToMany(documents)        → child: Document (srId FK)
+  ↓ @OneToMany(assignments)      → child: ServiceRequestAssignment
+  ↓ @ManyToOne(candidate)        → candidate: Candidate
+
+parent: Candidate
+  ↓ @OneToMany(serviceRequests)  → child: ServiceRequest (candidateId FK)
+  ↓ @OneToMany(documents)        → child: Document
+```
+
+**For each parent→child relationship, emit into matrix:**
+
+| Action | Cascade probe |
+|---|---|
+| `DELETE /parent/:id` | After delete, child endpoint returns 404 OR `child.parentId === null` OR child is also soft-deleted |
+| `DELETE /parent/:id` with `cascade=false` | Returns 409 if children exist, or leaves children orphaned (verify DB state) |
+| Archive parent (`archived=true`) | Children remain accessible (soft-archive shouldn't cascade by default) |
+
+This catches the common bug class: soft-delete deletes parent, children still
+appear in list endpoints, creating orphans.
+
+---
+
+### 1I — Authorization Boundary Scan (IDOR — OWASP Broken Access Control)
+
+OWASP's #1 application-security risk. Every endpoint that scopes to a user,
+tenant, or account ID is vulnerable if it doesn't verify the caller owns that
+scope. Scan for user-scoped route params and auto-generate cross-user probes.
+
+**Scan for scoped route params:**
+
+```bash
+# Route definitions with user/tenant/account-scoped params
+grep -rnE '(\/:[a-zA-Z_]*(user|tenant|account|candidate|owner|member)Id|<[a-zA-Z_]*(user|tenant|account|candidate)Id>)' \
+  --include="*.ts" --include="*.py" --include="*.rb" --include="*.go" --include="*.java" . \
+  | grep -v node_modules | grep -v spec
+
+# Entity ownership fields (things that define "whose resource is this")
+grep -rnE '(userId|ownerId|tenantId|accountId|candidateId|createdBy)(\s*:\s*|\s*=)' \
+  --include="*.entity.ts" --include="*.model.ts" --include="*.py" . \
+  | grep -v node_modules | head -40
+```
+
+**For each scoped endpoint, emit AUTHZ matrix rows:**
+
+| Action | Probe | Expected |
+|---|---|---|
+| GET `/users/:id/resource` | as user A, request user B's resource | 403 or 404 (never 200 + B's data) |
+| PATCH `/users/:id/resource` | as user A, mutate user B's resource | 403 or 404, B's data unchanged |
+| DELETE `/users/:id/resource` | as user A, delete user B's resource | 403 or 404, B's resource still exists |
+| POST `/resource` with `ownerId: B` as user A | create-on-behalf-of | 403 or silently rewrite ownerId=A |
+| Same-role tenant isolation | as tenant-A user, query tenant-B's list | empty results or 403 |
+
+Requires two actor contexts in `.env.test` (user A + user B of same role).
+Reuses `multi-actor.fixture.ts` with same-role numbering.
+
+**What NOT to probe:** endpoints that are explicitly documented as public
+read (e.g., `/visa-types` catalog, `/health`). Detect via HUNTER_NOTES or
+OpenAPI `security: []` declaration.
+
+---
+
+### 1J — File-Upload Surface Scan
+
+Every multipart endpoint is a security + correctness minefield. Scan for
+upload handlers and auto-generate 6 probes per endpoint.
+
+**Scan:**
+
+```bash
+# Multer / express upload
+grep -rn "multer\|upload\.single\|upload\.array\|FileInterceptor\|FilesInterceptor\|@UploadedFile\|@UploadedFiles" \
+  --include="*.ts" --include="*.js" . | grep -v node_modules
+
+# Python (FastAPI UploadFile, Django FILES)
+grep -rn "UploadFile\|request\.FILES\|FileField\|InMemoryUploadedFile" \
+  --include="*.py" . | grep -v venv
+
+# Rails ActiveStorage
+grep -rn "has_one_attached\|has_many_attached\|attach(" --include="*.rb" . | grep -v vendor
+
+# Go
+grep -rn "multipart\.\|FormFile\|multipart.File" --include="*.go" . | grep -v vendor
+```
+
+**For each detected endpoint, emit FILE-UPLOAD matrix rows:**
+
+| Probe | Input | Expected |
+|---|---|---|
+| Oversized | file > max_size (detect from multer/FileInterceptor config) | 400/413 naming size limit |
+| Zero-byte | empty file buffer | 400 or cleanly accepted per policy; never 500 |
+| MIME spoof | rename `.exe` as `.pdf`; send PDF extension + EXE magic bytes | 400 (magic-byte check), not 200 |
+| Path traversal filename | filename = `../../etc/passwd` | filename sanitized / 400; file not saved outside uploads dir |
+| Zip bomb | 10KB zip that decompresses to 10GB | rejected without processing |
+| No file supplied | multipart POST with no file part | 400 naming missing file |
+| Wrong field name | file sent as `image` instead of `document` | 400 |
+
+Helpers: the skill generates a `e2e/fixtures/files/` directory with
+deterministic fixture files (tinyPdf, zeroByte, oversizedPdf, zipBomb,
+spoofed). Framework-agnostic.
+
+---
+
+### 1K — Time / Timezone / Expiry Field Scan
+
+Date fields drive compliance logic (expired visas, pre-dated docs, DST
+rollovers). Scan DTO / entity decorators for date-typed fields and generate
+boundary probes per field.
+
+**Scan:**
+
+```bash
+# class-validator / TypeORM date fields
+grep -rnE "@IsDate|@IsDateString|@Column\(.*['\"](date|datetime|timestamp)" \
+  --include="*.ts" . | grep -v node_modules
+
+# Field names suggesting validity windows
+grep -rnE "(expir|issued|valid|start|end|effective|renewal)[A-Z][a-z]" \
+  --include="*.ts" --include="*.py" --include="*.go" . | grep -v node_modules | grep -v spec
+
+# Python — pydantic / Django
+grep -rnE "datetime|date\s*=|DateField|DateTimeField" \
+  --include="*.py" . | grep -v venv
+
+# Rails
+grep -rn "datetime\|date\|timestamp" db/schema.rb 2>/dev/null
+```
+
+**For each date field, emit TIME matrix rows:**
+
+| Probe | Input | Expected |
+|---|---|---|
+| Past date on future-only field (e.g., `startDate`) | yesterday | 400 |
+| Future date on past-only field (e.g., `issueDate`) | tomorrow | 400 |
+| `expiryDate < issueDate` | inverted window | 400 |
+| `expiryDate == issueDate` | zero window | 400 or accepted per policy |
+| DST rollover date | local time that doesn't exist (spring-forward gap) | normalized, no crash |
+| Leap day (Feb 29, 2024) | create on leap day, read back | round-trips exactly |
+| ISO 8601 vs epoch ms | same date in both formats | both accepted or one 400 — consistent |
+| TZ mismatch | `+12:00` sent, server in UTC | normalized correctly on read |
+| Far-future (year 9999) | edge of DB timestamp range | accepted or 400 |
+
+---
+
+### 1L — PII / Secret Redaction Scan
+
+Logs and API responses must never contain passwords, tokens, SSNs, or raw
+PII. Scan sink call sites for accidental leakage.
+
+**Scan:**
+
+```bash
+# Suspicious logging — full object dumps near auth
+grep -rnE "(logger|log|console)\.(log|info|debug|warn|error)\s*\(.*(user|request|body|password|token|session)" \
+  --include="*.ts" --include="*.js" --include="*.py" --include="*.rb" --include="*.go" . \
+  | grep -v node_modules | grep -v spec | head -20
+
+# Response DTOs — check if sensitive fields are explicitly excluded
+grep -rnE "@Exclude\|@Expose\|serialize|toJSON" \
+  --include="*.ts" . | grep -v node_modules
+```
+
+**Emit PII-REDACTION matrix rows (one per sensitive resource):**
+
+| Probe | Expected |
+|---|---|
+| GET `/users` or `/users/:id` response body | no `password`, `passwordHash`, `secret`, `apiKey`, raw `token` fields |
+| Error response on invalid login | no echoed password in error message |
+| Audit log entries (if exposed) | no raw tokens / passwords / SSNs |
+| Webhook payload (if present) | no PII beyond what's declared in contract |
+
+The existing `assertNoSecretsLeaked` helper in api.ts extends to this.
+
+---
+
+### 1M — Backwards-Compatibility Surface Scan
+
+APIs evolve. A v2 field is added, a v1 field is deprecated — old clients
+must keep working until a documented sunset date.
+
+**Scan:**
+
+```bash
+# OpenAPI / JSDoc @deprecated
+grep -rnE "@deprecated|\"deprecated\":\s*true" \
+  --include="*.ts" --include="*.js" --include="*.yaml" --include="*.json" . \
+  | grep -v node_modules
+
+# Versioned route prefixes
+grep -rnE "/v[0-9]+/|@Controller\(['\"]v[0-9]+" \
+  --include="*.ts" --include="*.py" --include="*.go" . | grep -v node_modules
+```
+
+**For each detected deprecated field or versioned route, emit COMPAT rows:**
+
+| Probe | Expected |
+|---|---|
+| POST with deprecated field populated | 200/201 (still accepted); response may show warning header |
+| GET response includes deprecated field | still present until sunset date |
+| Old `/v1/...` route still handles payload lacking v2-only fields | 200 with sensible defaults |
+| Sunset-date check | if `Deprecation: <date>` header present, date is in the future |
+
+---
+
+### 1N — Webhook Delivery Surface Scan (extends 1G)
+
+Outgoing webhooks are a specific side-effect class with stronger oracles:
+signature verification, retry-on-5xx, at-least-once delivery.
+
+Scan builds on 1G webhook detection. Emit WEBHOOK matrix rows:
+
+| Probe | Expected |
+|---|---|
+| Webhook payload shape | matches documented schema exactly |
+| Signature header present | valid HMAC of body using shared secret |
+| Receiver returns 500 | sender retries with exponential backoff |
+| Receiver returns 400 | sender does NOT retry (poison-pill protection) |
+| Idempotency key present | same event id never delivered twice unless receiver 5xxs |
+
+Requires a test-owned webhook receiver. Use `WEBHOOK_URL` from `.env.test`
+pointing to a local listener (e.g., `http://localhost:4000/webhook-sink`).
+
+---
+
 ### 1F — Cross-App Relationship Detection
 
 ```bash
@@ -548,6 +922,117 @@ Test Layer:
 - Forbidden (403, if roles exist)
 - Not found (404)
 
+**Additionally per mutation (POST/PUT/PATCH/DELETE):**
+
+- **Side-effect probe** (Phase 1G): if a sink was detected for this mutation,
+  verify the sink fired (audit row count increment, email log entry,
+  webhook invocation, queue message).
+- **Cascade probe** for every DELETE (Phase 1H): for each child relationship,
+  assert children are handled per the expected rule (cascade / nullify /
+  soft-archive / prevent-if-children).
+- **Idempotency probe** for POSTs with unique constraints: submit twice with
+  the same unique key → first 201, second 409 (not 500). Also applies to
+  PATCH of immutable fields (should 400/409, not silently ignore).
+- **Oracle on success** (Test Oracle checklist): status + GET-after-write +
+  no-secret-leak + list includes it (for creates) / list excludes it (for deletes).
+- **Cache / stale-data probe** (Gap I — auto-paired with every PATCH/PUT):
+  after successful mutation, GET `/:id` within 100ms must return new value.
+  If `Cache-Control` / `ETag` headers present, verify sensible TTL. Catches
+  stale-cache bugs between request layers (CDN, Redis, service cache).
+- **Optimistic-concurrency probe** (Gap L — auto-activate when `version` /
+  `etag` / `lastModified` / `If-Match` detected in DTO or headers):
+  two PATCHes with same stale version → first succeeds, second gets
+  409 or last-write-wins per documented policy. Prevents lost-update.
+- **Authorization-matrix probe** (Gap H, Phase 1I): for scoped endpoints,
+  every CRUD verb gets an IDOR probe as another actor.
+
+### 2D.3 — Required per file-upload endpoint (Gap J, Phase 1J)
+
+Six probes per multipart endpoint: oversized, zero-byte, MIME-spoof,
+path-traversal filename, zip bomb, no-file-supplied. Test Layer = FILE-UPLOAD.
+
+### 2D.4 — Required per date field (Gap K, Phase 1K)
+
+Per date field in mutation DTOs: past-on-future-only, future-on-past-only,
+inverted window (expiry < issue), DST rollover, leap day, ISO-vs-epoch,
+timezone round-trip. Test Layer = TIME.
+
+### 2D.5 — Required per list endpoint with pagination (Gap N extension)
+
+Beyond the baseline pagination test (H6) — emit deeper PAGINATION rows:
+
+| Probe | Expected |
+|---|---|
+| Sort stability across page boundary | same ordering key → same row never appears on two pages |
+| Cursor stability when row added mid-pagination | no duplicate on subsequent pages; new row either included or cleanly excluded |
+| Cursor stability when row deleted mid-pagination | no skipped rows; consistent total count |
+| Tie-breaking on equal sort key | secondary sort (e.g., id) ensures deterministic order |
+| limit=1 + page-through-all | total count matches sum of individual pages |
+
+### 2D.6 — Accessibility smoke (Gap M — apply per every page route)
+
+For every Green-readiness page found in Phase 1A, auto-inject axe-core:
+
+```typescript
+import AxeBuilder from '@axe-core/playwright';
+const { violations } = await new AxeBuilder({ page }).analyze();
+expect(violations, JSON.stringify(violations, null, 2)).toHaveLength(0);
+```
+
+Flags WCAG A+AA violations: missing alt text, label/input disassociation,
+color-contrast failures, non-semantic heading order, keyboard-trap dialogs.
+Test Layer = A11Y.
+
+Skip for Red pages (same rationale as 1E.2 conditional-render).
+
+### 2D.7 — Responsive viewport (Gap R — apply per every page route)
+
+For every Green-readiness page, auto-generate 3 viewport probes:
+
+| Viewport | Width | Probe |
+|---|---|---|
+| Mobile | 375px | no horizontal scroll on `<body>`; primary action button reachable without scroll |
+| Tablet | 768px | navigation accessible (hamburger expanded OR sidebar pinned) |
+| Desktop | 1440px | no orphan whitespace ratio > 40%; no overlapping absolute-positioned elements |
+
+Test Layer = RESPONSIVE. Use `page.setViewportSize({ width, height })`.
+
+### 2D.8 — PII / secret redaction oracles (Gap O, Phase 1L)
+
+For every GET that returns user/auth data, run `assertNoSecretsLeaked` over
+the entire response tree. For every error response, scan body for any field
+named `password*`, `token*`, `secret*`, `apiKey*`, `ssn*`. Test Layer = PII.
+
+### 2D.9 — Backwards-compatibility probes (Gap P, Phase 1M)
+
+Per deprecated field or versioned route: POST with deprecated field still
+succeeds; sunset-date header in the future. Test Layer = COMPAT.
+
+### 2D.2 — Required coverage per status-enum field (multi-hop state chains)
+
+For every entity with a status enum, Phase 2E is not enough — single `A→B`
+transitions miss chain bugs like "after REJECT you can't RESUBMIT". Generate
+chains up to depth 3 via DFS over valid transitions.
+
+**Algorithm:**
+
+1. Read the enum (e.g., `ServiceRequestStatus { DRAFT, ACTIVE, ON_HOLD, COMPLETED }`).
+2. Read the state-transition table (either explicit `canTransitionTo()` method,
+   decorator, or infer from status-change handler code).
+3. DFS from each starting state, depth 3, no-repeat. Each distinct path = one
+   test row.
+
+**Required chains per enum:**
+
+| Chain | Assertion |
+|---|---|
+| Full happy path (first → last terminal state) | Every hop returns 200, final state reached, entity has expected fields at each step |
+| Reverse / recovery chain (e.g., REJECTED → RESUBMIT → UNDER_REVIEW → APPROVED) | User can recover from non-terminal failure states |
+| Dead-end chain attempt (terminal → anywhere) | COMPLETED / DELETED states cannot transition out; 400/409 |
+| Skip-hop attempt (DRAFT → COMPLETED directly) | Returns 400/409 naming the illegal transition |
+
+Each distinct chain → one matrix row labeled `Test Layer: STATE-CHAIN`.
+
 ### 2E — Required coverage per cross-app relationship
 
 - Create in A → appears in B
@@ -556,6 +1041,36 @@ Test Layer:
 - Permission boundary
 - Failure isolation (B down → A degrades gracefully)
 - Data consistency (same record, identical values in both)
+
+**Field-level round-trip — mandatory for every "Create in A → appears in B" test:**
+
+It is NOT enough to assert `entityOnB.id === entityOnA.id`. That misses the
+most common cross-portal bug class: admin edits a field → candidate sees a
+stale or missing value. For every cross-app assertion, iterate every visible
+DTO field and assert round-trip equality.
+
+Detection input:
+- Read the entity's response DTO (from `@visaplatform/common`, `packages/*/dtos`,
+  OpenAPI schema, or direct response shape).
+- For each primitive / string / enum / date / number field, add an assertion.
+- For nested objects (address, customFields, metadata JSON), recurse.
+- Skip server-generated fields: `id`, `createdAt`, `updatedAt`, `deletedAt`,
+  `version`, `checksum`.
+
+Emit the assertion through the shared helper (see `templates/cross-app.spec.ts.template`):
+
+```typescript
+assertEntityRoundTrip(entityFromA, entityFromB, {
+  skip: ['id', 'createdAt', 'updatedAt'],  // server-generated
+});
+```
+
+The helper diffs every field and throws with a clear path like
+`expected candidate.customFields.visaType "Skilled" but got "Student"`.
+
+For entities with **custom-field / dynamic-schema** columns (JSON/JSONB
+blobs that hold arbitrary keys), iterate keys — don't just compare objects
+by reference.
 
 ### 2F — Summary to output
 
@@ -764,6 +1279,73 @@ await expect(page.getByRole('dialog')).toHaveCount(0);
 file-only / form-only / hybrid / template), write a separate test per mode
 with a focused assertion on what's unique to that mode. Don't multiplex
 modes into one test.
+
+**Interaction-sequence tests (generate three per dialog, Green readiness only):**
+
+Dialogs are stateful — single-open-submit-close misses sequence bugs. For
+each Green-readiness dialog, generate these three scenarios:
+
+1. **Reopen-after-submit** (state reset oracle)
+   ```ts
+   await openDialog(page, 'Create Thing');
+   await dlg.getByLabel(/name/i).fill('First');
+   await dlg.getByRole('button', { name: /submit/i }).click();
+   await expect(page.getByRole('dialog')).toHaveCount(0);  // closed
+   // Reopen — must be empty, not pre-filled with 'First'
+   await openDialog(page, 'Create Thing');
+   await expect(dlg.getByLabel(/name/i)).toHaveValue('');
+   ```
+
+2. **Double-submit / rapid-click** (idempotency / loading-state oracle)
+   ```ts
+   await openDialog(page, 'Create Thing');
+   await dlg.getByLabel(/name/i).fill('Unique ' + Date.now());
+   const submit = dlg.getByRole('button', { name: /submit/i });
+   await Promise.all([submit.click(), submit.click()]);
+   // Only one entity should be created — probe via API count
+   ```
+
+3. **ESC-discard mid-edit** (draft-discard oracle)
+   ```ts
+   await openDialog(page, 'Create Thing');
+   await dlg.getByLabel(/name/i).fill('Draft content');
+   await page.keyboard.press('Escape');
+   await expect(page.getByRole('dialog')).toHaveCount(0);
+   // Reopen — draft should NOT persist (unless product policy says otherwise)
+   await openDialog(page, 'Create Thing');
+   await expect(dlg.getByLabel(/name/i)).toHaveValue('');
+   ```
+
+Skip these sequences for Amber/Red dialogs — they rely on stable handles
+that don't exist yet.
+
+### 4.1c Multi-actor scenario tests (bulk recipients, concurrent users)
+
+Trigger condition — auto-activate when any of these holds:
+
+- An endpoint accepts `recipientIds[]`, `userIds[]`, `candidateIds[]`, or similar array fields
+- HUNTER_NOTES `## Focus` or `## Multi-actor scenarios` section names it
+- Phase 1F cross-app detection found an "A broadcasts to N B's" pattern
+
+Use `templates/multi-actor.fixture.ts` which provisions N parallel sessions
+from `.env.test` keys:
+
+```bash
+# .env.test — declare N actors of the same role
+CANDIDATE_1_EMAIL=candidate1@test.com
+CANDIDATE_1_PASSWORD=...
+CANDIDATE_2_EMAIL=candidate2@test.com
+CANDIDATE_2_PASSWORD=...
+CANDIDATE_3_EMAIL=candidate3@test.com
+CANDIDATE_3_PASSWORD=...
+```
+
+Each multi-actor test covers:
+
+- **Broadcast fanout** — admin sends to N recipients, every recipient sees it
+- **Concurrent edit** — two admins edit same entity, second save gets 409 or overwrites per defined policy
+- **Race on unique** — two actors try to create the same unique entity simultaneously, exactly one succeeds
+- **Parallel independence** — N candidates submit different documents in parallel, no cross-contamination in review queue
 
 ### 4.2 API tests — auth header per backend
 

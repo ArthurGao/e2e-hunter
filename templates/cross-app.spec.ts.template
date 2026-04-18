@@ -14,6 +14,50 @@
 import { test, expect } from '../fixtures/multi-app.fixture';
 import { waitForSync } from '../helpers/wait-for-sync';
 
+/**
+ * Deep-diff two entity views across apps and fail with a precise path + values
+ * on the first mismatch. Use this in every cross-app test — asserting only
+ * `entity.id` misses the common bug class where admin edits a field but
+ * candidate sees a stale/missing value.
+ *
+ * Example:
+ *   assertEntityRoundTrip(adminView, candidateView, {
+ *     skip: ['id', 'createdAt', 'updatedAt', 'version'],
+ *   });
+ */
+export function assertEntityRoundTrip(
+  entityFromA: unknown,
+  entityFromB: unknown,
+  opts: { skip?: string[]; path?: string } = {},
+): void {
+  const skip = new Set(opts.skip ?? ['id', 'createdAt', 'updatedAt', 'deletedAt', 'version']);
+  const path = opts.path ?? '$';
+
+  if (entityFromA === null || entityFromA === undefined) {
+    expect(entityFromB, `${path}: A is ${entityFromA}, B is ${entityFromB}`).toBe(entityFromA);
+    return;
+  }
+  if (typeof entityFromA !== 'object') {
+    expect(entityFromB, `${path}: A="${entityFromA}" ≠ B="${entityFromB}"`).toEqual(entityFromA);
+    return;
+  }
+  if (Array.isArray(entityFromA)) {
+    expect(Array.isArray(entityFromB), `${path}: A is array, B is not`).toBe(true);
+    expect((entityFromB as unknown[]).length, `${path}: length mismatch`).toBe(entityFromA.length);
+    entityFromA.forEach((v, i) => {
+      assertEntityRoundTrip(v, (entityFromB as unknown[])[i], { skip: [...skip], path: `${path}[${i}]` });
+    });
+    return;
+  }
+  // Plain object — walk keys
+  const a = entityFromA as Record<string, unknown>;
+  const b = (entityFromB ?? {}) as Record<string, unknown>;
+  for (const key of Object.keys(a)) {
+    if (skip.has(key)) continue;
+    assertEntityRoundTrip(a[key], b[key], { skip: [...skip], path: `${path}.${key}` });
+  }
+}
+
 // ── Happy path ───────────────────────────────────────────────────────────
 test.describe('<Flow> — happy path', () => {
   test('create in App A appears in App B', async ({ appA, appB }) => {
@@ -97,5 +141,28 @@ test.describe('<Flow> — data consistency', () => {
     const appBValue = await appB.page.getByTestId('item-title').textContent();
 
     expect(appAValue).toEqual(appBValue);
+  });
+
+  test('every DTO field round-trips between apps (API-level oracle)', async ({ request }) => {
+    // Stronger than the UI title-only check above — diffs every visible field.
+    // Catches the common bug: admin edits customFields.visaType → candidate
+    // sees stale value because their cached DTO didn't refresh.
+    const id = '<known-test-id>';
+    const adminRes = await request.get(`${process.env.API_URL}/<item-route>/${id}`, {
+      headers: { /* admin auth */ },
+    });
+    const candidateRes = await request.get(`${process.env.API_URL}/<item-route>/${id}`, {
+      headers: { /* candidate auth */ },
+    });
+    expect(adminRes.ok()).toBeTruthy();
+    expect(candidateRes.ok()).toBeTruthy();
+
+    const adminView = (await adminRes.json())?.data;
+    const candidateView = (await candidateRes.json())?.data;
+
+    // Skip server-generated fields that legitimately differ (e.g., role-gated)
+    assertEntityRoundTrip(adminView, candidateView, {
+      skip: ['id', 'createdAt', 'updatedAt', 'deletedAt', 'version'],
+    });
   });
 });

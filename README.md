@@ -391,15 +391,63 @@ e2e-hunter/
     ├── playwright.config.ts         # Auto-loads .env.test via dotenv
     ├── auth.setup.ts                # JWT / session / SSO-bypass per-stack
     ├── multi-app.fixture.ts         # Iterates APPS list at runtime
+    ├── multi-actor.fixture.ts       # N parallel sessions of same role (Gap E)
     ├── wait-for-sync.ts             # Cross-app consistency polling helper
     ├── page.spec.ts.template        # Browser test boilerplate
     ├── api.spec.ts.template         # HTTP-only test boilerplate
-    ├── cross-app.spec.ts.template   # Multi-app test boilerplate
+    ├── cross-app.spec.ts.template   # Multi-app test boilerplate (+assertEntityRoundTrip)
     ├── HUNTER_NOTES.md.example      # Copy to e2e/HUNTER_NOTES.md
     └── .env.test.example            # Copy to .env.test
 ```
 
 ---
+
+## Bug classes auto-detected by the skill
+
+All scenario generation is driven by scanning your codebase — the skill reads
+DTO validators, ORM relationships, status enums, conditional JSX, sink calls,
+and bulk-endpoint signatures, then emits matrix rows you approve before
+anything is generated. Zero per-project manual bullets required.
+
+| Bug class | Where it's detected | Matrix label |
+|---|---|---|
+| Unauth / 401 | Phase 1C auth boundaries | baseline |
+| Invalid input / 400 | DTO validators (class-validator, Zod, Yup, Joi) | baseline |
+| Not found / 404 | Phase 1B endpoints | baseline |
+| Conditional UI branches (Gap F) | Phase 1E.2 — `{state === 'X' && ...}` scan | STATE-FIXTURE |
+| Cross-portal field sync (Gap C) | Phase 2E field-level round-trip via `assertEntityRoundTrip` | cross-app |
+| Side-effect sinks (Gap A) | Phase 1G — audit/email/event/webhook grep | SIDE-EFFECT |
+| Cascade cleanup (Gap B) | Phase 1H — ORM relationship scan (TypeORM / Prisma / Sequelize / Django / ActiveRecord / GORM / JPA) | CASCADE |
+| Multi-hop state chains (Gap D) | Phase 2D.2 — DFS depth 3 over status enum transitions | STATE-CHAIN |
+| Multi-actor scenarios (Gap E) | Phase 1B — `recipientIds[]` / `broadcast` / `bulkCreate` endpoint signatures | MULTI-ACTOR |
+| Dialog interaction sequences (Gap G) | Phase 4B — auto-generated per Green-readiness dialog | UI (sequence) |
+| **Authorization / IDOR (Gap H)** | Phase 1I — scoped route params (`:userId`, `:tenantId`) | AUTHZ |
+| **Cache / stale data (Gap I)** | Phase 2D — paired with every mutation | baseline |
+| **File-upload hardening (Gap J)** | Phase 1J — multer / UploadFile / ActiveStorage scan | FILE-UPLOAD |
+| **Time / timezone / expiry (Gap K)** | Phase 1K — date DTO fields + validity-window names | TIME |
+| **Optimistic concurrency (Gap L)** | Phase 2D — auto-activates when `version`/`etag`/`If-Match` detected | baseline |
+| **Accessibility (Gap M)** | Phase 2D.6 — axe-core injection per Green page | A11Y |
+| **Pagination deep-probes (Gap N)** | Phase 2D.5 — extends baseline pagination (cursor + sort stability) | PAGINATION |
+| **PII / secret redaction (Gap O)** | Phase 1L — sensitive-field scan + `assertNoSecretsLeaked` | PII-REDACTION |
+| **Backwards compatibility (Gap P)** | Phase 1M — `@deprecated` + versioned-route scan | COMPAT |
+| **Webhook delivery (Gap Q)** | Phase 1N — extends 1G sink scan | WEBHOOK |
+| **Responsive viewport (Gap R)** | Phase 2D.7 — 375/768/1440px per Green page | RESPONSIVE |
+
+For Gap E (multi-actor) and Gap H (IDOR), provision N actors in `.env.test`
+with the `CANDIDATE_1_EMAIL` / `CANDIDATE_2_EMAIL` / ... convention — the
+`multi-actor.fixture.ts` picks them up automatically.
+
+For Gap A / Q (side-effect and webhook oracles against a DB), set
+`TEST_DB_URL` in `.env.test` if you want direct DB probes; otherwise the
+skill falls back to calling `/audit-logs` / `/events` list endpoints if
+exposed. Set `WEBHOOK_URL` to a test-owned sink endpoint for webhook probes.
+
+For Gap M (accessibility), install `@axe-core/playwright` — the skill
+auto-injects it per Green page. `npm install -D @axe-core/playwright`.
+
+For Gap J (file-upload), the skill generates deterministic fixture files
+under `e2e/fixtures/files/` on the first run (tiny PDF, zero-byte, MIME-spoof,
+path-traversal filename, zip bomb). No external binary required.
 
 ## Troubleshooting
 
