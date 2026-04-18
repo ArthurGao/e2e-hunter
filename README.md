@@ -1,8 +1,21 @@
 # e2e-hunter
 
-A Claude Code skill that **hunts bugs** by auto-generating and running
-comprehensive E2E tests for any full-stack project using Playwright.
-Framework-agnostic — works with any frontend and backend.
+A Claude Code skill that **hunts bugs** by generating and running comprehensive
+E2E tests for any full-stack project using Playwright. Framework-agnostic —
+works across any frontend/backend combination.
+
+Unlike naïve test generators, e2e-hunter does two things differently:
+
+1. **Detects before forcing.** Before writing tests, it scores each UI surface
+   on test-readiness (`data-testid`, `aria-label`, `htmlFor`). Low-readiness
+   components get smoke-only tests plus a concrete list of fixes to raise the
+   score — never brittle tests that pass once and break on the next refactor.
+2. **Respects project notes.** An optional `e2e/HUNTER_NOTES.md` lets you steer
+   every phase — what to ignore, what to cover deeply, which dev-mode oddities
+   to classify as `KNOWN_QUIRK` instead of bugs, and rules the fix-loop must
+   respect.
+
+---
 
 ## Trigger phrases
 
@@ -15,10 +28,12 @@ In Claude Code, say any of these:
 - "Find bugs automatically"
 - "Set up E2E testing"
 
+---
+
 ## Supported stacks
 
 | Frontend | Backend |
-|----------|---------|
+|---|---|
 | Next.js (App Router + Pages Router) | NestJS |
 | React + React Router | Express / Koa / Fastify |
 | Vue 3 + Vue Router | FastAPI (Python) |
@@ -28,26 +43,63 @@ In Claude Code, say any of these:
 | Any app with an OpenAPI spec | Spring Boot (Java / Kotlin) |
 | | Laravel (PHP) |
 
-Auth: JWT, Session/Cookie, OAuth/SSO bypass, API Key.
+**Auth:** JWT, Session/Cookie, OAuth/SSO bypass, API Key, mock-header dev mode.
+
+---
+
+## What gets produced
+
+After a successful run you'll have three artifacts in `e2e/`:
+
+| File | What it contains |
+|---|---|
+| `e2e/SCENARIO_MATRIX.md` | Tech stack, app inventory, cross-app map, full scenario table with priorities, readiness scores per UI component. Persisted at end of Phase 2 — you review/approve before tests are generated. |
+| `e2e/BUG_REPORT.md` | Every failure classified as `API_BUG`, `UI_BUG`, `AUTH_BUG`, `SYNC_BUG`, `TIMEOUT`, `TEST_BUG`, `TEST_HOSTILE_UI`, or `KNOWN_QUIRK`, with root cause, stack layer, and suggested fix. Updated each round. |
+| `e2e/*.spec.ts` | The test files themselves — API tests, page tests, and (for multi-app) cross-app tests. |
 
 ---
 
 ## Configuring e2e-hunter in a project
 
-The skill is **project-agnostic**. You configure it for each project via a
-single `.env.test` file — nothing in the skill itself changes.
+The skill is **project-agnostic**. All project-specific configuration lives in
+two files — the skill folder itself is never edited.
 
-### Step 1 — Install the skill
+### Required files (skill won't run without these)
 
-Drop the skill folder into your project (or symlink it from a shared location):
+| File | Purpose |
+|---|---|
+| `.env.test` (project root) | URLs, credentials, per-app auth flags |
+| `playwright.config.ts` (project root) | `webServer` commands, projects, ports |
+
+### Recommended files (unlock better output)
+
+| File | Unlocks |
+|---|---|
+| `e2e/HUNTER_NOTES.md` | Scope/focus directives; dev-mode-quirk classification; fix-loop guardrails |
+| `data-testid` / `aria-label` / `htmlFor` on interactive UI | Raises readiness scores → skill generates real interaction tests instead of smoke-only |
+| DTO validators (`class-validator`, `Zod`, `Yup`, `Joi`) | Skill auto-derives boundary/validation tests from decorators |
+| A seed script (`npm run seed`, etc.) | Skill suggests running it before Phase 5 so data-dependent tests don't skip |
+
+### Optional
+
+| File | Purpose |
+|---|---|
+| OpenAPI / Swagger spec | Fallback endpoint discovery when backend is non-JS |
+| Docker compose | Service graph mapping for cross-app tests |
+
+---
+
+## Step-by-step install
+
+### Step 1 — Drop the skill into `.claude/`
+
+Standard Claude Code layout:
 
 ```bash
 mkdir -p .claude/skills
 # Option A: copy
 cp -r /path/to/e2e-hunter .claude/skills/
-# Option B: unzip a release
-unzip e2e-hunter.zip -d .claude/skills/
-# Option C: symlink (recommended — one copy, shared across projects)
+# Option B: symlink (recommended — one copy, shared across projects)
 ln -s ~/shared/skills/e2e-hunter .claude/skills/e2e-hunter
 ```
 
@@ -71,11 +123,10 @@ cp .claude/skills/e2e-hunter/templates/playwright.config.ts ./playwright.config.
 ```
 
 The template auto-loads `.env.test` from its own directory via
-`dotenv.config({ path: path.resolve(__dirname, '.env.test') })`, so it works
-regardless of where Playwright is invoked from.
+`dotenv.config({ path: path.resolve(__dirname, '.env.test') })`.
 
 Adjust the `webServer` blocks and `projects` array to match your app(s) —
-ports, start commands, and which test folders map to which project.
+ports, start commands, and which test folders map to which Playwright project.
 
 ### Step 4 — Create `.env.test` at project root
 
@@ -83,52 +134,34 @@ ports, start commands, and which test folders map to which project.
 cp .claude/skills/e2e-hunter/templates/.env.test.example .env.test
 ```
 
-Fill in real values. `.env.test` is the **only project-specific configuration**
-the skill needs:
+Fill in real values:
 
 ```bash
-# Single-app
-BASE_URL=http://localhost:3000
-API_URL=http://localhost:3001
-TEST_EMAIL=test@example.com
-TEST_PASSWORD=your-test-password
+# ── Backend API
+API_URL=http://localhost:3000/api
 
-# Multi-app (any number of apps — list them in APPS, then define per-app keys)
-# APPS=admin,agency,candidate
-#
-# APP_ADMIN_URL=http://localhost:3001
-# APP_ADMIN_EMAIL=admin@test.com
-# APP_ADMIN_PASSWORD=admin-password
-# APP_ADMIN_AUTH=true
-#
-# APP_AGENCY_URL=http://localhost:3002
-# APP_AGENCY_EMAIL=agency@test.com
-# APP_AGENCY_PASSWORD=agency-password
-# APP_AGENCY_AUTH=true
-#
-# APP_CANDIDATE_URL=http://localhost:3003
-# APP_CANDIDATE_EMAIL=candidate@test.com
-# APP_CANDIDATE_PASSWORD=candidate-password
-# APP_CANDIDATE_AUTH=true
+# ── Apps (registry — skill iterates over this list)
+APPS=admin,candidate
+
+# ── admin portal
+APP_ADMIN_URL=http://localhost:3001
+APP_ADMIN_EMAIL=admin@example.com
+APP_ADMIN_PASSWORD=your-admin-password
+APP_ADMIN_AUTH=true
+
+# ── candidate portal
+APP_CANDIDATE_URL=http://localhost:3003
+APP_CANDIDATE_EMAIL=candidate@example.com
+APP_CANDIDATE_PASSWORD=your-candidate-password
+APP_CANDIDATE_AUTH=true
 ```
 
-**How it scales:** The fixture (`multi-app.fixture.ts`) and auth setup
-(`auth.setup.ts`) both iterate over the `APPS` list at runtime — add or remove
-a name in `APPS` and its matching `APP_<NAME>_*` keys, and everything works.
-No code changes needed.
+**How it scales:** add or remove a name in `APPS` and its matching
+`APP_<NAME>_*` keys. Nothing in the skill changes. Works for 1 app or 10.
 
-**In tests:**
-
-```ts
-import { test, expect } from './fixtures/multi-app.fixture';
-
-test('candidate uploads doc, admin sees it', async ({ apps }) => {
-  await apps.candidate.page.goto('/documents');
-  // ...
-  await apps.admin.page.goto('/candidates/123');
-  await expect(apps.admin.page.getByText('...')).toBeVisible();
-});
-```
+**Auth-free mode:** set `APP_<NAME>_AUTH=false` if your app doesn't require
+login in dev (e.g., mock guard). The skill will skip `auth.setup.ts` for that
+app and use a raw browser context.
 
 ### Step 5 — Gitignore `.env.test`
 
@@ -136,115 +169,242 @@ test('candidate uploads doc, admin sees it', async ({ apps }) => {
 echo ".env.test" >> .gitignore
 ```
 
-Never commit real credentials. Commit `.env.test.example` instead as a template
-for teammates.
+Commit the `.env.test.example` template instead.
 
-### Step 6 — Install Playwright dependencies
+### Step 6 — Install Playwright
 
 ```bash
 npm install -D @playwright/test dotenv
 npx playwright install chromium
 ```
 
-### Step 6b — (optional) Write project notes
-
-Drop an `e2e/HUNTER_NOTES.md` to steer the skill — what to ignore, what to
-focus on, fix-loop constraints, known dev-mode quirks to not classify as bugs,
-and questions the skill should ask before generating. Template:
+### Step 7 — (Strongly recommended) Write `e2e/HUNTER_NOTES.md`
 
 ```bash
 cp .claude/skills/e2e-hunter/templates/HUNTER_NOTES.md.example e2e/HUNTER_NOTES.md
-# then edit e2e/HUNTER_NOTES.md
+# then edit to your project's realities
 ```
 
-Structure:
+Structure (every section optional):
 
 ```markdown
-## Scope                # Phase 1 + 2 — areas to exclude
-## Focus                # Phase 2 + 4 — areas to cover more deeply
-## Constraints          # Phase 7 — fix-loop rules ("do not touch X")
-## Known dev-mode quirks # Phase 6 — classify as KNOWN_QUIRK not a bug
-## Ask user before generating  # (optional) — stops before Phase 4 to ask
+## Scope                        # exclude listed areas from scanning + matrix
+## Focus                        # cover these areas deeply (more scenarios, P0)
+## Constraints                  # fix-loop guardrails ("don't touch backend/auth")
+## Known dev-mode quirks        # tag matching failures as KNOWN_QUIRK, not a bug
+## Test-readiness notes         # override auto-scores on specific components
+## Ask user before generating   # questions the skill asks before Phase 4
 ```
 
-Precedence: chat instructions > `HUNTER_NOTES.md` > skill defaults.
+**Precedence:** chat instructions > `HUNTER_NOTES.md` > skill defaults.
 
-### Step 7 — Trigger the skill
+### Step 8 — Trigger the skill
 
 In Claude Code, say:
 
 > Hunt for bugs in this project
 
-The skill will detect your stack, build a Scenario Matrix, wait for your
-approval, generate tests, run them, and produce a classified bug report.
+The skill detects your stack, builds a scenario matrix, **stops for your
+approval**, generates tests, runs them, and produces a classified bug report.
+
+---
+
+## Making your project more hunter-friendly
+
+Most bugs the hunter can detect depend on signals in your codebase. Here's
+what to add to get deeper, less brittle tests.
+
+### Frontend — raise test-readiness scores
+
+The hunter scores every dialog / modal / wizard / drawer on a 0–1 scale:
+
+```
+score = (data-testid + aria-label + htmlFor count) / interactive targets
+```
+
+| Score | Band | What gets generated |
+|---|---|---|
+| ≥ 0.80 | 🟢 Green | Full interaction tests using `getByRole` / `getByLabel` / `getByTestId` |
+| 0.30–0.80 | 🟡 Amber | Happy-path + one edge case; brittle steps wrapped in `.catch(() => skip)` |
+| < 0.30 | 🔴 Red | **Mount-only** smoke tests + a line in the bug report: "add X testids to raise to Green" |
+
+**To move components from Red → Green:**
+
+1. Add `data-testid` on named action buttons: `<Button data-testid="sr-submit">Submit</Button>`
+2. Pair every `<Input>` / `<Textarea>` with `<label htmlFor="...">` (not just `<Label>` parents)
+3. Add `aria-label` on icon-only buttons and pagination controls
+4. Use `role="dialog"` / `role="heading"` on containers
+
+### Backend — unlock auto-derived boundary tests
+
+The hunter reads DTO validators and generates boundary tests automatically:
+
+```typescript
+// packages/common/src/dtos/service-request.ts
+export class CreateServiceRequestDto {
+  @IsString()
+  @MinLength(5)          // → generates test: length=4 expects 400
+  @MaxLength(500)        // → generates test: length=501 expects 400
+  serviceDescription!: string;
+
+  @IsEnum(ServiceType)   // → generates test: "NOT_A_TYPE" expects 400
+  serviceType!: ServiceType;
+
+  @IsEmail()             // → generates test: "not-an-email" expects 400
+  contactEmail?: string;
+}
+```
+
+Works with `class-validator` (NestJS), `Zod` (anywhere), `Yup` (anywhere),
+`Joi` (Express/Hapi) — the skill detects which you use.
+
+### Backend — unlock state-machine tests
+
+Expose a status enum on entities and the hunter generates a transition matrix:
+
+```typescript
+export enum ServiceRequestStatus {
+  DRAFT = 'draft',
+  ACTIVE = 'active',
+  ON_HOLD = 'on_hold',
+  COMPLETED = 'completed',
+}
+```
+
+Every `PATCH /:id/status` is probed with every combination. Invalid
+transitions must return 400/409, valid ones must round-trip on re-read.
+
+### Test data — make cleanup visible
+
+Use a unique prefix on all test-created data so orphans are greppable:
+
+```typescript
+import { uniq } from '../helpers/api';
+
+const description = `HUNT SR ${uniq()}`;  // HUNT-prefixed, timestamp-suffixed
+```
+
+Then grep the DB for cleanup:
+
+```sql
+SELECT id, description, deleted_at FROM service_requests
+WHERE description ILIKE 'HUNT%' OR description ILIKE 'E2E-HUNTER%';
+```
+
+---
+
+## How it works — phases
+
+### Pre-flight (always first)
+- **Read `HUNTER_NOTES.md`** — apply scope/focus/constraints/quirks for the run.
+- **Infrastructure scan** — dev server health, conditional base paths, seed scripts, Docker compose. Flags dev-server overload, base-path conflicts, missing fixtures.
+
+### Phase 0 — Detect tech stack
+Language, framework, router type, port, auth method, start command per app.
+
+### Phase 1 — Discovery
+| Sub-phase | What it does |
+|---|---|
+| 1A | Frontend route scan |
+| 1B | Backend endpoint scan |
+| 1C | Auth boundary detection |
+| 1D | UI component enumeration (dialog/modal/wizard/drawer/sheet) |
+| 1E | Test-readiness scoring per component |
+| 1F | Cross-app relationship detection |
+
+### Phase 2 — Build scenario matrix
+| Sub-phase | What it does |
+|---|---|
+| 2A | Tech stack map |
+| 2B | App inventory |
+| 2C | Scenario matrix (with readiness column) |
+| 2D | Required coverage per route/endpoint |
+| 2E | Required coverage per cross-app relationship |
+| 2F | Summary counts |
+| 2G | Apply HUNTER_NOTES scope/focus |
+| 2H | Persist to `e2e/SCENARIO_MATRIX.md` |
+
+**→ STOP for your approval.** Nothing is generated without sign-off.
+
+### Phase 3 — Playwright setup
+Install deps, adapt config to detected stack, generate `auth.setup.ts` per app.
+
+### Phase 4 — Generate test files
+Page tests (browser), API tests (HTTP-only), cross-app tests (multi-app only).
+Readiness gates depth: Green gets full interactions, Red gets mount-only.
+
+### Phase 5 — Run
+Headless batch first, then headed per failure for investigation. Artifacts
+(screenshots, videos, traces) on fail.
+
+### Phase 6 — Bug report
+Every failure classified by type + stack layer. Persisted to
+`e2e/BUG_REPORT.md`.
+
+### Phase 7 — Fix-and-retest loop (max 5 rounds)
+Minimal-diff fixes, retest, regression detection, auto-revert on regression.
+Respects `HUNTER_NOTES.md` constraints (LOC caps, DNT paths, "propose don't apply" rules).
 
 ---
 
 ## Per-project configuration summary
 
-Everything that varies between projects lives in **two places**:
+Everything that varies between projects lives in **three places**:
 
-| File | Purpose |
-|------|---------|
-| `.env.test` (project root) | URLs, credentials, test secrets |
-| `playwright.config.ts` (project root) | `webServer` commands, ports, projects |
+| File | Purpose | Required? |
+|---|---|---|
+| `.env.test` (project root) | URLs, credentials, test secrets | **Required** |
+| `playwright.config.ts` (project root) | webServer commands, ports, projects | **Required** |
+| `e2e/HUNTER_NOTES.md` | Scope, focus, quirks, fix-loop rules | Strongly recommended |
 
-The skill itself (`.claude/skills/e2e-hunter/`) stays untouched and reusable
-across projects.
+The skill itself (`.claude/skills/e2e-hunter/`) is never edited — reusable
+across all your projects.
 
 ---
 
-## How it works — 7 phases
-
-| Phase | What happens |
-|-------|-------------|
-| 0 | Detect tech stack (language, framework, port, auth, start command) |
-| 1 | Scan all routes, endpoints, auth boundaries, cross-app signals |
-| 2 | Build Scenario Matrix → **wait for your approval** |
-| 3 | Playwright setup (config, auth, file structure) |
-| 4 | Generate test files (page, API, cross-app) |
-| 5 | Run headless → headed per failure |
-| 6 | Bug Report (classified by type + stack layer) |
-| 7 | Fix-and-retest loop (max 5 rounds, regression detection) |
-
 ## Manual prompt sequence
 
-If you prefer driving the skill manually, paste from `prompts/` in order:
+If you prefer driving the skill manually without triggers, paste from
+`prompts/` in order:
 
-1. `05-multi-app-context.md` — optional, multi-app with no docs only
-2. `01-discover.md` — detect + matrix (stops for approval)
-3. `02-generate.md` — generate files (stops for confirmation)
-4. `03-run-and-report.md` — run + bug report
-5. `04-fix-loop.md` — fix loop until clean
+1. `05-multi-app-context.md` — optional, multi-app without docs only
+2. `01-discover.md` — pre-flight + Phase 0 + 1 + 2 (stops for approval)
+3. `02-generate.md` — Phase 3 + 4 (stops for confirmation)
+4. `03-run-and-report.md` — Phase 5 + 6
+5. `04-fix-loop.md` — Phase 7 until clean or 5 rounds
+
+---
 
 ## Files included
 
 ```
 e2e-hunter/
-├── SKILL.md                         # 7-phase methodology
-├── README.md
+├── SKILL.md                         # Full 7-phase methodology
+├── README.md                        # This file
 ├── prompts/
-│   ├── 01-discover.md               # Phase 0+1+2
-│   ├── 02-generate.md               # Phase 3+4
-│   ├── 03-run-and-report.md         # Phase 5+6
+│   ├── 01-discover.md               # Pre-flight + Phase 0 + 1 + 2
+│   ├── 02-generate.md               # Phase 3 + 4
+│   ├── 03-run-and-report.md         # Phase 5 + 6
 │   ├── 04-fix-loop.md               # Phase 7
-│   └── 05-multi-app-context.md      # Optional seed
+│   └── 05-multi-app-context.md      # Optional seed for multi-app projects
 └── templates/
     ├── playwright.config.ts         # Auto-loads .env.test via dotenv
-    ├── auth.setup.ts
-    ├── multi-app.fixture.ts
-    ├── wait-for-sync.ts
-    ├── page.spec.ts.template
-    ├── api.spec.ts.template
-    ├── cross-app.spec.ts.template
-    └── .env.test.example            # Copy to project root as .env.test
+    ├── auth.setup.ts                # JWT / session / SSO-bypass per-stack
+    ├── multi-app.fixture.ts         # Iterates APPS list at runtime
+    ├── wait-for-sync.ts             # Cross-app consistency polling helper
+    ├── page.spec.ts.template        # Browser test boilerplate
+    ├── api.spec.ts.template         # HTTP-only test boilerplate
+    ├── cross-app.spec.ts.template   # Multi-app test boilerplate
+    ├── HUNTER_NOTES.md.example      # Copy to e2e/HUNTER_NOTES.md
+    └── .env.test.example            # Copy to .env.test
 ```
+
+---
 
 ## Troubleshooting
 
 **`.env.test` values not loading?**
-Confirm your `playwright.config.ts` has the `dotenv.config(...)` call at the
-top (the template includes it). If you copied an older template, add:
+Confirm `playwright.config.ts` has the `dotenv.config(...)` call at the top:
 
 ```ts
 import dotenv from 'dotenv';
@@ -252,9 +412,32 @@ import path from 'path';
 dotenv.config({ path: path.resolve(__dirname, '.env.test') });
 ```
 
-**Module not found: `dotenv`?**
-`npm install -D dotenv`.
+**Module not found: `dotenv`?** `npm install -D dotenv`.
 
-**Tests hit a real server instead of failing?**
-Another process is listening on the configured port — `reuseExistingServer`
-will pick it up. Stop the other process or change ports in `.env.test`.
+**Tests hit a real server instead of using Playwright's webServer?**
+Another process is on the configured port — `reuseExistingServer: !CI` picks
+it up. Stop the other process or change ports in `.env.test`.
+
+**Dev server crashes under parallel load (`Target page, context or browser has been closed`)?**
+Known `next dev` / `vite` quirk. Either drop `workers: 1` on the affected
+project, or build once (`npm run build`) and point `webServer.command` at the
+prod `start` script. Document the choice in `HUNTER_NOTES.md` under
+`## Known dev-mode quirks` so the skill classifies future flakes correctly.
+
+**Every UI test is mount-only — why?**
+Components scored Red (< 0.30 readiness). Open `e2e/BUG_REPORT.md` — the
+classification section lists specific testids / aria-labels / htmlFors to add.
+Applying them and re-running the hunter re-scores the components upward.
+
+**Test DB filled with `HUNT*` rows?**
+Tests clean up with `DELETE` at end of each run, but some APIs soft-delete
+(rows still in table with `deleted_at` set, just hidden from default lists).
+Periodic hard-delete:
+
+```sql
+DELETE FROM service_requests WHERE service_description LIKE 'HUNT%' OR service_description LIKE 'E2E-HUNTER%';
+```
+
+**Skill doesn't auto-trigger on my phrase?**
+Check `CLAUDE.md` — the "Available Skills" block must reference the skill
+file path exactly. Or invoke manually: "read .claude/skills/e2e-hunter/SKILL.md and follow it".
