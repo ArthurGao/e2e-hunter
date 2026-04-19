@@ -144,6 +144,75 @@ message broker). Skipping these causes silent 500s downstream.
 
 ---
 
+## Phase 0.5 — PR-mode diff scope (opt-in, language-agnostic)
+
+When `E2E_HUNTER_DIFF_BASE` is set OR the user says "PR mode" / "scan my
+PR" / "scan the diff", restrict ALL Phase 1 scans to files that changed
+relative to the base branch. Dramatically faster and produces tests that
+match the scope of the PR under review.
+
+```bash
+# 1. Resolve base branch
+BASE="${E2E_HUNTER_DIFF_BASE:-main}"
+# Fall back gracefully if the named base doesn't exist
+git rev-parse --verify "$BASE" >/dev/null 2>&1 \
+  || BASE="$(git rev-parse --abbrev-ref --verify @{upstream} 2>/dev/null || echo main)"
+
+# 2. List changed + new files (added, copied, modified, renamed)
+CHANGED_FILES=$(git diff --name-only --diff-filter=ACMR "${BASE}...HEAD")
+
+# 3. Keep only files any of the existing Phase 1 greps would scan
+SOURCE_EXT='\.(ts|tsx|js|jsx|mjs|cjs|py|rb|go|java|kt|php|vue|svelte)$'
+RELEVANT_FILES=$(echo "$CHANGED_FILES" | grep -E "$SOURCE_EXT" || true)
+
+# 4. Also pull in direct importers of changed files (one grep per language).
+#    Covers "service method changed, controllers still need regression tests."
+IMPORTERS=""
+for f in $RELEVANT_FILES; do
+  basename=$(basename "$f" | sed 's/\.[^.]*$//')
+  # TS/JS: import ... from '.../basename'
+  # Python: from ... import basename / import basename
+  # Java:   import <pkg>.basename; (name-only match is a superset — ok for filtering)
+  # Ruby:   require 'basename' / require_relative 'basename'
+  # Go:     import path segment
+  IMPORTERS+=$(grep -rlE "\\b${basename}\\b" --include="*.ts" --include="*.tsx" \
+    --include="*.js" --include="*.py" --include="*.rb" --include="*.go" \
+    --include="*.java" --include="*.kt" 2>/dev/null \
+    | grep -v node_modules | grep -v venv || true)
+  IMPORTERS+=$'\n'
+done
+
+# 5. Deduplicated scope — Phase 1 scans restrict to this list
+SCOPE=$(printf '%s\n%s\n' "$RELEVANT_FILES" "$IMPORTERS" | sort -u | grep -v '^$')
+```
+
+How Phase 1 uses the scope:
+
+- **1A frontend routes** — intersect with `SCOPE`; only changed pages become matrix rows
+- **1B backend endpoints** — grep on the intersection; only changed controllers emit rows
+- **1D UI components** — only components in `SCOPE` get readiness-scored / conditional-scanned
+- **1G side-effect sinks** — detect sinks in changed service files; pair with their mutations
+- **1H cascades** — rescan ORM relationships only for entities that changed
+- **1I/1J/1K/1L/1M** — same pattern: restrict greps to `SCOPE`
+
+Matrix rows produced in PR mode are **labeled with `[PR]`** so humans can
+distinguish "tests added because of this PR" from "tests that already existed."
+
+**Zero language-specific code** — step 1 uses git, step 2 is a regex on file
+paths. Works identically on TypeScript, Java, Python, JavaScript, Go, Ruby,
+PHP, or any future language the skill supports.
+
+### Fallback behavior
+
+- `E2E_HUNTER_DIFF_BASE` unset and user didn't mention PR → full scan (current
+  default).
+- `CHANGED_FILES` empty (branch matches base) → skip generation, print
+  "no files changed vs ${BASE} — nothing to test."
+- `SCOPE` is non-empty but maps to zero endpoints/components → emit "changed
+  files touch no testable surface (e.g., only config/docs)" and stop.
+
+---
+
 ## Phase 0 — Detect Tech Stack (ALWAYS run this first)
 
 Before any scanning, identify exactly what is in the repo.

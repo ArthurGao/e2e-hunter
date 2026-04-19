@@ -209,6 +209,149 @@ approval**, generates tests, runs them, and produces a classified bug report.
 
 ---
 
+## How to use e2e-hunter (daily workflow)
+
+**Core rule: tests are CODE — reused, committed, maintained. The skill is a
+one-time bootstrap + incremental extender, not a regenerator.**
+
+After the initial run, run `npx playwright test` daily. Only invoke
+e2e-hunter when you need to **add** coverage, never to regenerate it.
+
+### When to invoke e2e-hunter
+
+| Situation | Action |
+|---|---|
+| Daily dev / CI | `npx playwright test` — no hunter needed |
+| New endpoint / module added | Invoke hunter targeted at the new module |
+| New bug class suspected | Invoke hunter with a specific Phase by name |
+| Monthly / quarterly drift check | Invoke hunter broadly, merge new tests |
+| Skill itself updated (new phases shipped) | Invoke hunter broadly, review new matrix rows |
+
+### Five invocation patterns (use the one that fits)
+
+**1. New endpoint / module added**
+
+> "I just added `backend/src/modules/invoice/`. Use e2e-hunter to scan it and
+> **add tests to `e2e/api/` without touching existing specs**."
+
+The skill scans only the new module → produces new spec files → leaves every
+existing file alone.
+
+**2. Target a specific bug class**
+
+> "Use e2e-hunter **Phase 1I (IDOR scan)** on `/api/candidates/*`. **Add a
+> new `hunt-authz.spec.ts`** with the probes — don't modify existing tests."
+
+Phase names you can cite:
+
+- **Phase 1G** → side-effect sinks (audit logs, emails, queues)
+- **Phase 1H** → cascade cleanup (DELETE parent → children)
+- **Phase 1I** → IDOR / authorization matrix
+- **Phase 1J** → file-upload hardening
+- **Phase 1K** → time / expiry fields
+- **Phase 1L** → PII redaction
+- **Phase 1M** → backwards compatibility
+- **Phase 1N** → webhook delivery
+- **Phase 2D.2** → multi-hop state chains
+- **Phase 2D.5** → pagination deep-probes
+- **Phase 2D.6** → accessibility (axe-core)
+- **Phase 2D.7** → responsive viewport
+
+**3. Describe a user flow in plain English**
+
+> "Add tests for the **candidate move-between-SRs flow** — admin moves
+> candidate A from SR1 to SR2, verify old SR hides them, new SR shows them,
+> docs migrate."
+
+The skill treats flow descriptions as `## Focus` directives and generates
+end-to-end probes.
+
+**4. Extend an existing test file**
+
+> "Add 3 more boundary probes to `e2e/api/hunt-boundaries.spec.ts` — cover
+> `Date` fields on `CandidateDto` with H28, H29, H30."
+
+Explicit file + test numbers + target DTO. Skill appends to existing file.
+
+**5. Write a regression test for a bug-report finding**
+
+> "BUG_REPORT.md Finding #14 says `?search=` silently ignores input. **Add a
+> regression test** under `e2e/api/` that catches this specifically."
+
+Direct reference to the finding number → skill reads the report context
+and writes the probe.
+
+**6. PR mode — scan only what changed in the current branch**
+
+> "Use e2e-hunter in **PR mode** — scan the diff against `main` and add tests
+> for the changed code only."
+
+Or set `E2E_HUNTER_DIFF_BASE=main` in `.env.test` once and just say:
+
+> "Scan my PR and add missing tests."
+
+The skill runs `git diff --name-only <base>...HEAD`, filters to source
+files, expands scope to direct importers (catches regressions in callers
+of changed code), and restricts every Phase 1 scan to that file list.
+Matrix rows produced this way are labeled `[PR]` so you can distinguish
+them from pre-existing coverage.
+
+**Works across all supported languages** (TS / JS / Python / Java / Go /
+Ruby / PHP / Kotlin) because it's pure `git diff` + file-path filtering
+— no per-language AST parsing.
+
+CI integration example (GitHub Actions):
+
+```yaml
+- name: e2e-hunter PR scan
+  if: github.event_name == 'pull_request'
+  env:
+    E2E_HUNTER_DIFF_BASE: ${{ github.base_ref }}
+  run: |
+    # Invoke Claude Code with e2e-hunter, trigger PR mode
+    # (exact CLI depends on your agent runner)
+    claude-code --skill e2e-hunter --prompt "Scan my PR and add missing tests"
+```
+
+### The one-liner that works 80% of the time
+
+> **"Use e2e-hunter to find coverage gaps in `<specific area>` and add tests
+> in `<target file OR new file>` that catch `<what bug class you care about>`."**
+
+Example:
+> "Use e2e-hunter to find coverage gaps in the **messaging module** and add
+> tests in a **new `hunt-messaging.spec.ts`** that catch **cascade-on-delete
+> and PII-leak** issues."
+
+### Anti-patterns (don't say these)
+
+| ❌ Don't say | ✅ Say instead |
+|---|---|
+| "regenerate e2e tests" | "add tests for X that aren't covered yet" |
+| "run e2e-hunter" (vague) | "run e2e-hunter Phase 1I on `/candidates`" |
+| "make tests for everything" | list the specific resource / flow / bug class |
+| "overwrite my tests" | "extend file X" or "create new file Y" |
+| "rerun all the hunters" | `npx playwright test` — the tests are already there |
+
+### What the skill needs every time
+
+Every invocation should carry three things:
+
+1. **Target** — which resource, module, flow, or Phase number
+2. **Scope** — "add new file" vs "extend existing file X" vs "only if missing"
+3. **Guardrails** — automatic from `e2e/HUNTER_NOTES.md`; mention exceptions inline
+
+### Golden rule
+
+> **Skill = tool to set up and extend tests.**
+> **Tests = code, committed and maintained like any other code.**
+
+Treat hunter output the same way you'd treat code from a scaffolding tool
+(Nest CLI, Rails generators): the tool bootstraps, humans iterate, git
+tracks the result.
+
+---
+
 ## Making your project more hunter-friendly
 
 Most bugs the hunter can detect depend on signals in your codebase. Here's
@@ -448,6 +591,95 @@ auto-injects it per Green page. `npm install -D @axe-core/playwright`.
 For Gap J (file-upload), the skill generates deterministic fixture files
 under `e2e/fixtures/files/` on the first run (tiny PDF, zero-byte, MIME-spoof,
 path-traversal filename, zip bomb). No external binary required.
+
+## PR mode — scan only what changed (multi-language)
+
+For CI and day-to-day development, you usually don't want to re-scan your
+entire repo — you want tests for **the code in this PR**. PR mode does
+exactly that, and it works across every language the skill supports.
+
+### When to use
+
+| Situation | Mode | Why |
+|---|---|---|
+| Daily dev / full refactor audit | Full scan | Catches drift anywhere in the repo |
+| Every PR in CI | **PR mode** | Adds only the tests the diff needs |
+| New module added | Full scan | Nothing to diff against yet |
+| Small feature branch | **PR mode** | Fast, relevant, no noise |
+
+### How it works (3 steps, language-agnostic)
+
+1. **Resolve base + diff**
+   ```bash
+   BASE="${E2E_HUNTER_DIFF_BASE:-main}"
+   CHANGED_FILES=$(git diff --name-only --diff-filter=ACMR "${BASE}...HEAD")
+   ```
+2. **Filter to source files** (one regex covers all supported languages):
+   ```bash
+   SOURCE_EXT='\.(ts|tsx|js|jsx|mjs|cjs|py|rb|go|java|kt|php|vue|svelte)$'
+   SCOPE=$(echo "$CHANGED_FILES" | grep -E "$SOURCE_EXT")
+   ```
+3. **Expand to direct importers** (one grep per extension catches "service
+   changed, controllers still need regression tests") — again, purely
+   file-path / symbol-name based, no AST parsing.
+
+Every existing Phase 1 scan then restricts to `SCOPE`. Matrix rows emitted
+this way are labeled `[PR]` so humans can distinguish them from pre-existing
+coverage.
+
+### Supported languages
+
+`.ts` `.tsx` `.js` `.jsx` `.mjs` `.cjs` `.py` `.rb` `.go` `.java` `.kt`
+`.php` `.vue` `.svelte` — the entire matrix the skill already supports
+works identically in PR mode, because the added logic is pure `git` +
+file-extension filtering.
+
+### Benefits
+
+| Benefit | Full scan | PR mode |
+|---|---|---|
+| Time on small PR (5 changed files) | ~2 min | **~15 sec** |
+| Generated tests match PR surface | ❌ noisy | ✅ exact |
+| Fits CI `pull_request` trigger | awkward | **natural** |
+| Works for TS + Java + Python + JS | ✅ | ✅ (one code path) |
+
+### CI example (GitHub Actions)
+
+```yaml
+- name: e2e-hunter PR scan
+  if: github.event_name == 'pull_request'
+  env:
+    E2E_HUNTER_DIFF_BASE: ${{ github.base_ref }}
+  run: |
+    claude-code --skill e2e-hunter \
+      --prompt "Scan my PR and add missing tests"
+```
+
+### Fallback behavior
+
+- `E2E_HUNTER_DIFF_BASE` unset and user didn't mention PR → **full scan**.
+- Changed files exist but touch no testable surface (config / docs / tests
+  only) → skill stops with "changed files touch no testable surface."
+- No files changed vs base → skill stops with "nothing to test."
+
+### How to invoke
+
+Either of these activates PR mode:
+
+```
+> "Scan my PR against main and add missing tests."
+> "Use e2e-hunter in PR mode."
+```
+
+Or set the env var once in `.env.test`:
+
+```bash
+E2E_HUNTER_DIFF_BASE=main
+```
+
+…and every subsequent invocation runs in PR mode automatically.
+
+---
 
 ## Troubleshooting
 

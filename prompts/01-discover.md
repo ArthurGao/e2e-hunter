@@ -18,6 +18,36 @@ STEP -1 — Read project notes (if present):
   User's chat instructions this session override the file.
   If the file is absent, proceed with defaults.
 
+STEP -0.5 — PR-mode diff scope (opt-in, language-agnostic):
+
+  Activate IF the user says "PR mode" / "scan my PR" / "scan the diff"
+  OR the env var E2E_HUNTER_DIFF_BASE is set.
+
+    BASE="${E2E_HUNTER_DIFF_BASE:-main}"
+    git rev-parse --verify "$BASE" >/dev/null 2>&1 \
+      || BASE="$(git rev-parse --abbrev-ref --verify @{upstream} 2>/dev/null || echo main)"
+    CHANGED_FILES=$(git diff --name-only --diff-filter=ACMR "${BASE}...HEAD")
+    SOURCE_EXT='\.(ts|tsx|js|jsx|mjs|cjs|py|rb|go|java|kt|php|vue|svelte)$'
+    SCOPE=$(echo "$CHANGED_FILES" | grep -E "$SOURCE_EXT" || true)
+
+    # Expand scope to include direct importers (catches regression cases)
+    for f in $SCOPE; do
+      base=$(basename "$f" | sed 's/\.[^.]*$//')
+      IMPORTERS=$(grep -rlE "\\b${base}\\b" --include="*.ts" --include="*.tsx" \
+        --include="*.js" --include="*.py" --include="*.rb" --include="*.go" \
+        --include="*.java" --include="*.kt" 2>/dev/null \
+        | grep -v node_modules | grep -v venv || true)
+      SCOPE=$(printf '%s\n%s\n' "$SCOPE" "$IMPORTERS" | sort -u | grep -v '^$')
+    done
+
+  If $SCOPE is empty and PR mode was requested, print
+    "PR mode: no source files changed vs ${BASE}; nothing to test."
+  and stop.
+
+  Otherwise, **restrict every grep / find command in steps below to $SCOPE**
+  (pass it as the file-list argument to grep, or intersect find-results with it).
+  Matrix rows emitted in PR mode are labeled `[PR]` in Phase 2.
+
 STEP 0 — Detect tech stack:
 
 Find all apps:
